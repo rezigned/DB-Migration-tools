@@ -223,16 +223,16 @@ switch($step) {
         $dst_form = new Form_Migrate_DB('dst');
         
         $src_form->set_initial(array(
-            'src[name]' => 'ssat2_beta',
-            'src[user]' => 'root',
-            'src[pass]' => 'eastlane',
+            'src[name]' => 'db_1',
+            'src[user]' => '',
+            'src[pass]' => '',
             'src[filter]' => '',
         ));
 
         $dst_form->set_initial(array(
-            'dst[name]' => 'ssat2_staging',
-            'dst[user]' => 'root',
-            'dst[pass]' => 'eastlane',
+            'dst[name]' => 'db_2',
+            'dst[user]' => '',
+            'dst[pass]' => '',
             'dst[filter]' => '',
         ));
         
