@@ -2,8 +2,6 @@
 
 $step  = max($_GET['step'], 1);
 $forms = array();
-$cont  = new Controller;
-$url   = current(explode('?', $_SERVER['REQUEST_URI']));
 
 $next_step = $step + 1;
 $prev_step = $step - 1;
@@ -23,71 +21,40 @@ $steps = array(
     )
 );
 
-# $dsn = DB_TYPE . '://' . $username . ':' . rawurlencode($password) . '@' . rawurlencode($server) . '/' . $database;
-function migrate_connect($dsn) {
+$flag_css = array(
+    '+' => 'new',
+    '-' => 'del',
+    ''  => '',
+);
 
-    $_dba = @NewADOConnection($dsn);
-
-    if (is_object($_dba)) {
-        $_dba->setFetchMode(ADODB_FETCH_ASSOC);
-        if (DB_CHARSET != '') {
-            $names = 'SET NAMES \'' . DB_CHARSET . '\'';
-            if (DB_COLLATE != '') {
-                $names .= ' COLLATE \'' . DB_COLLATE . '\'';
-            }
-            $charset = 'SET CHARACTER SET \'' . DB_CHARSET . '\'';
-            if (DB_COLLATE != '') {
-                $charset .= ' COLLATE \'' . DB_COLLATE . '\'';
-            }
-            
-            $_dba->Execute($names);
-            $_dba->Execute($charset);
-        }
-    }
-    
-    return $_dba;
-}
-
-function migrate_get_connections() {
-    
-    # static $db1, $db2;
-    
-    #if (!$db1) {
-        $db1 = migrate_connect($_SESSION['migrate']['src_db']);
-        $db2 = migrate_connect($_SESSION['migrate']['dst_db']);
-    #}
-
-    return array($db1, $db2);
-}
+$num_max_steps = sizeof($steps);
 
 function migrate_execute($cmd = null) {
     
-    # BUGS list($src_db, $new_db) = migrate_get_connections();
-
-    $db1  = migrate_connect($_SESSION['migrate']['src_db']);
+    static $src, $dst;
+    
+    if (!$src || !$dst) {
+        $src = new Simple_DB($_SESSION['migrate']['src_db']);
+        $dst = new Simple_DB($_SESSION['migrate']['dst_db']);
+    }
+    
     $set1 = $set2 = array();
     
     try {
-        $set1 = $db1->getall($cmd);
-    } catch (Exception $e) {}
-    
-    $db2 = migrate_connect($_SESSION['migrate']['dst_db']);
-    
-    try {
-        $set2 = $db2->getall($cmd);
+        $set1 = $src->fetch($cmd);
+        $set2 = $dst->fetch($cmd);
     } catch (Exception $e) {}
     
     return array($set1, $set2);
 }
 
-function c5_tables($tables) {
+function migrate_redirect($to, $base = null) {
     
-    $data = array();
-    foreach($tables as $t) {
-        $data[] = current($t);
-    }
+    if (!$base)
+        $base = current(explode('?', $_SERVER['REQUEST_URI']));
     
-    return $data;
+    header('Location: ' . $base . $to);
+    die;
 }
 
 function migrate_compute_diff($src, $dst) {
@@ -154,59 +121,218 @@ function migrate_generate_alter_sql($table, $src_info, $dst_info, $news, $dels) 
     return $dst_sql ? "ALTER TABLE `$table` \n" . join(",\n", $dst_sql) : null;
 }
 
-class Form_Migrate_DB extends Libraries_LR_Form {
-    public $title = 'Old database';
-    public $fields = array(
-        'name' => array(
-            'input',
-            'label' => 'DB Name',
-            'attrs' => 'class="txt xlarge"',
-        ),
-        'user' => array(
-            'input',
-            'label' => 'User',
-            'attrs' => 'class="txt xlarge"',
-        ),
-        'pass' => array(
-            'input',
-            'label' => 'Password',
-            'attrs' => 'class="txt xlarge"',
-        ),
-        'filter' => array(
-            'input',
-            'label' => 'Filter table',
-            'attrs' => 'class="txt xlarge"',
-        )
-    );  
+class Simple_DB {
+    protected $db;
+    public function __construct($dsn) {
+        list($d, $user, $pass) = explode('|', $dsn);
+        
+        $this->db = new PDO($d, $user, $pass, array(
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+        ));
+        
+//        $names = 'SET NAMES \'' . DB_CHARSET . '\'';
+//        if (DB_COLLATE != '') {
+//            $names .= ' COLLATE \'' . DB_COLLATE . '\'';
+//        }
+//        $charset = 'SET CHARACTER SET \'' . DB_CHARSET . '\'';
+//        if (DB_COLLATE != '') {
+//            $charset .= ' COLLATE \'' . DB_COLLATE . '\'';
+//        }
+    }
     
-    public function __construct($prefix = 'src') {
-        $this->prefix = $prefix;
+    public function __call($name, $args) {
+        return call_user_func_array(array($this->db, $name), $args);
+    }
+    
+    public function fetch($query, $args = null) {
+        $stmt = $this->db->prepare($query);
+        $stmt->execute($args);
         
-        $_fields = array();
-        foreach($this->fields as $k => $v) {
-            $_fields[$prefix. '[' . $k . ']'] = $v;
-        }
+        return $stmt->fetchAll();
+    }
+}
+
+class Simple_Form {
+    
+    public $ns,
+           $elements = array(), $cleaned = array(), 
+           $element  = array('name' => '', 'label' => '', 'attrs' => ''),
+           $configs  = array('ns' => null, 'validator' => null),
+           $errors   = array(),
+            
+           $validator;
+    
+    public function __construct($elements = array(), $configs = array()) {
         
-        $this->fields = $_fields;
+        if ($elements) $this->elements = $elements;
+        if ($configs)  $this->configs  = $configs + $this->configs;
+        
+        if ($this->configs['ns']) 
+            $this->ns = $this->configs['ns'];
+    }
+
+    public function validator() {
+        
+        if ($this->validator)
+            return $this->validator;
+        
+        # add validator
+        if ($this->configs['validator'])
+            $this->validator = $this->configs['validator'];
+        else
+            $this->validator = new Simple_Validator;    
+        
+        return $this->validator;
     }
     
     public function is_valid($data) {
         
+        $v      = $this->validator();
+        $errors = array();
+        
+        foreach($this->elements as $name => $e) {
+
+            $val = $this->val($name, $data);
+            if (!empty($e['rules'])) {
+                
+                # failed
+                if ($er = $v->validate($e['rules'], $val))
+                    $errors[$name] = join(', ', $er);
+                
+                # passed
+                else
+                    $this->cleaned[$name] = $val;
+            }
+        }
+        
+        if ($errors) {
+            $this->errors = $errors;
+        }
+
+        return !$this->has_error();
+    }
+
+    public function has_error() {
+        return sizeof($this->errors);
+    }
+    
+    public function render($as = 'div', $attrs = 'class="row"') {
+        
+        $html = array();
+        foreach($this->elements as $name => $e) {
+            $render = 'render_' . $e['type'];
+            $label  = $this->render_label($name);
+            $name   = $this->create_name($name);
+            $html[] = "<$as $attrs>" . $label . $this->$render($name, $this->val($name), $this->attr($name)) . "</$as>";
+        }
+        
+        return join("\n", $html);
+    }
+    
+    public function render_label($name) {
+        $label = $this->elements[$name]['label'];
+        return sprintf('<label for="%s" %s>%s</label>', $name, null, $label);
+    }
+    
+    public function render_text($name, $val = null, $attrs = null) {
+        return sprintf('<input type="text" name="%s" value="%s" %s/>', $name, $val, $attrs);
+    }
+    
+    
+    public function attr($name) {
+        return !empty($this->elements[$name]['attrs']) ? $this->elements[$name]['attrs'] : '';
+    }
+    
+    public function val($name, $data = array()) {
+        
+        if (!$data)
+            $data = $this->cleaned;
+        
+        if ($this->ns)
+            $data = $data[$this->ns];
+
+        return array_key_exists($name, (array)$data) ? $data[$name] : null;
+    }
+    
+    public function create_name($name) {
+        return $this->ns ? $this->ns . '[' . $name . ']' : $name;
+    }
+
+    public function set_initial(){}
+}
+
+class Simple_Validator {
+    public $error_msgs = array(
+        'required' => 'is required',
+    );
+    public $errors = array();
+    
+    public function validate($rules, $val, $config = array()) {
+
+        $errors = array();
+        foreach(explode('|', $rules) as $rule) {
+            
+            if (method_exists($this, $rule))
+                if (!$this->$rule($val, $config)) {
+                    
+                    $errors[] = $this->error_msgs[$rule];
+                }
+        }
+        
+        return $errors;
+    }
+    
+    public function required($val) {
+        return trim($val) !== '';
+    }
+}
+
+
+class Form_Migrate_DB extends Simple_Form {
+    public $ns = 'src';
+    public $elements = array(
+        'name' => array(
+            'type'  => 'text',
+            'label' => 'DB Name',
+            'rules'  => 'required',
+            'attrs' => 'class="txt xlarge"',
+        ),
+        'user' => array(
+            'type'  => 'text',
+            'label' => 'User',
+            'rules'  => 'required',
+            'attrs' => 'class="txt xlarge"',
+        ),
+        'pass' => array(
+            'type'  => 'text',
+            'label' => 'Password',
+            'rules'  => 'required',
+            'attrs' => 'class="txt xlarge"',
+        ),
+        'filter' => array(
+            'type'  => 'text',
+            'label' => 'Filter table',
+            'attrs' => 'class="txt xlarge"',
+        )
+    );
+    
+    public function is_valid($data) {
+
         if (!parent::is_valid($data))
             return;
         
-        $data = $data[$this->prefix];
-        
+        $data = $this->cleaned;
+
         # try connect db
-        $dsn  = DB_TYPE . '://' . $data['user'] . ':' . $data['pass'] . '@' . 'localhost' . '/' . $data['name'];
-        # $dst_dsn = DB_TYPE . '://' . $data['user'] . ':' . $data['pass'] . '@' . 'localhost' . '/' . $data['name'];
+        $dsn  = 'mysql:dbname=' . $data['name'] . ';host=localhost|'  . $data['user'] . '|' . $data['pass'];
         
-        $_SESSION['migrate'][$this->prefix . '_db'] = $dsn;
-        
-        $db     = migrate_connect($dsn);
-        
-        if (!$db) {
-            $this->add_error('name', 'Cannot connect db');
+        try {
+            $db = new Simple_DB($dsn);
+            $_SESSION['migrate'][$this->ns . '_db'] = $dsn;
+        }
+        catch(Exception $e) {
+            $this->errors['name'] = $e->getMessage();
         }
         
         # $tables = $db->getall('SHOW TABLES LIKE ?', $data['filter'].'%');
@@ -219,37 +345,29 @@ switch($step) {
     # SELECT DB
     case 1:
         
-        $src_form = new Form_Migrate_DB;
-        $dst_form = new Form_Migrate_DB('dst');
-        
-        $src_form->set_initial(array(
-            'src[name]' => 'db_1',
-            'src[user]' => '',
-            'src[pass]' => '',
-            'src[filter]' => '',
-        ));
+        $src_form = new Form_Migrate_DB(null, array('ns' => 'src', 'title' => 'Source DB'));
+        $dst_form = new Form_Migrate_DB(null, array('ns' => 'dst', 'title' => 'Destination DB'));
 
-        $dst_form->set_initial(array(
-            'dst[name]' => 'db_2',
-            'dst[user]' => '',
-            'dst[pass]' => '',
-            'dst[filter]' => '',
-        ));
-        
         if ($_POST) {
-            
-            $valid = 1;
-            foreach(array($src_form, $dst_form) as $f) {
-                $valid &= $f->is_valid($_POST);
-            }
 
-            if ($valid)
-                $cont->redirect($url . '?step=' . $next_step);
+            $errors = array();
+            foreach(array($src_form, $dst_form) as $f) {
+                if (!$f->is_valid($_POST))
+                    $errors[] = $f->errors;
+            }
+            
+            if ($errors) {
+                $errors    = current($errors);
+                $not_fatal = 1;
+            }
+            
+            if (!$errors)
+                migrate_redirect('?step=' . $next_step);
 
         }
         break;
     
-    # SELECT COLUMN
+    # SELECT TABLE
     case 2:
         
         if (empty($_SESSION['migrate']['src_db']) || empty($_SESSION['migrate']['dst_db'])) {
@@ -258,23 +376,22 @@ switch($step) {
             break;
         }
 
-        list($old_tables, $cur_tables) = migrate_execute('SHOW TABLES');
+        list($src_tables, $dst_tables) = migrate_execute('SHOW TABLES');
 
-        $old_tables = c5_tables($old_tables);
-        $cur_tables = c5_tables($cur_tables);
+        $src_tables     = array_map(create_function('$a', 'return current($a);'), $src_tables);
+        $dst_tables     = array_map(create_function('$a', 'return current($a);'), $dst_tables);
         
-        $num_old_tables = sizeof($old_tables);
-        $num_cur_tables = sizeof($cur_tables);
+        $num_old_tables = sizeof($src_tables);
+        $num_cur_tables = sizeof($dst_tables);
         
         # compute 
-        list($tables) = migrate_compute_diff($old_tables, $cur_tables);
+        list($tables) = migrate_compute_diff($src_tables, $dst_tables);
         
         if ($_POST) {
-            
-            
+
             if (!empty($_POST['new_tables'])) {
                 $_SESSION['migrate']['new_tables'] = $_POST['new_tables'];
-                $cont->redirect($url . '?step=' . $next_step);
+                migrate_redirect('?step=' . $next_step);
             }
             
             $errors = "Please select at least one tables";
@@ -284,7 +401,7 @@ switch($step) {
     # SELECT COLUMN
     case 3:
         
-        if (empty($_SESSION['migrate']['new_tables'])) {
+        if (empty($_SESSION['migrate']['new_tables']) || !is_array($_SESSION['migrate']['new_tables'])) {
             
             $errors = 'Please select table from (Step 2) first';
             break;
@@ -306,7 +423,6 @@ switch($step) {
             }
             
             # gen sql
-            #$sql = array("CREATE TABLE IF NOT EXISTS `$t` (");
             $sql     = array('# CREATE TABLE');
             $cols    = array();
             $src_sql = $dst_sql = array();
@@ -321,7 +437,7 @@ switch($step) {
             foreach($dst_cols as $c) {
                 $dst_info[$c['Field']] = $c;
             }
-            
+
             # prep columns
             list($set, $news, $dels) = migrate_compute_diff(array_keys($src_info), array_keys($dst_info));
             
@@ -348,14 +464,15 @@ switch($step) {
                 }
             }
             
+            # ALTER 
             else {
             
                 # generate alter tables for DST
                 $tables[$t]['dst_sql']   = migrate_generate_alter_sql($t, $src_info, $dst_info, $news, $dels);
 
+                # generate alter tables for SRC   
                 list($set, $news, $dels) = migrate_compute_diff(array_keys($dst_info), array_keys($src_info));
                 $tables[$t]['src_sql']   = migrate_generate_alter_sql($t, $dst_info, $src_info, $news, $dels);
-                # generate alter tables for SRC   
             }            
 
             $tables[$t]['changes'] = $changes;
@@ -2753,6 +2870,10 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
     .alt {
         background: #EEE;
     }
+    .flag {
+        font-size: 15px;
+        font-weight: normal;
+    }
     .new {
         background: #DDFFDD;
     }
@@ -2769,10 +2890,10 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
     .text-top {
         vertical-align: top;
     }
-    .row1, .row2 {
+    .row {
         padding-bottom: 10px;
     }
-    .row1 label, .row2 label {
+    .row label {
         padding: 0;
         margin-right: 10px;
     }
@@ -2784,6 +2905,9 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
     }
     form input[type=text] {
         padding: 6px;
+    }
+    fieldset legend {
+        padding-left: 130px;
     }
     .form-actions {
         margin-bottom: 18px;
@@ -2823,6 +2947,14 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
     .breadcrumb .active .title {
         color: #555;
     }
+    .error, .error li {
+        color: #844;
+        text-shadow: 0 1px 1px #FDD;
+    }
+    .error ul {
+        margin: 0;
+        list-style: none;
+    }
 </style>
 
 <div class="container">
@@ -2835,7 +2967,7 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
         
     <ul class="breadcrumb">
         <?php foreach($steps as $i => $d): $selected = $i == $step; ?>
-        <li <?php if ($selected) echo 'class="active"' ?>>
+        <li class="<?php if ($selected) echo 'active' ?> ">
             <?php if ($selected): ?>
             <strong class="title"><?php echo $d['title'] ?></strong>
             <?php else: ?>
@@ -2848,9 +2980,19 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
         
 <?php if ($errors): ?>
 <div class="alert-message error">
-        <p><?php echo $errors ?></p>
+    
+    <?php if (is_array($errors)): ?>
+    <ul>
+        <?php foreach($errors as $name => $v): ?>
+        <li><strong><?php echo $name ?></strong> <?php echo $v ?></li>
+        <?php endforeach ?>
+    </ul>
+    <?php else: ?>
+    <p><?php echo $errors ?></p>
+    <?php endif ?>
 </div>
-<?php else: ?>
+<?php endif ?>
+<?php if (!$errors || $not_fatal): ?>
 
         
         <div class="form-actions well">
@@ -2858,7 +3000,7 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
             <a class="action" href="?step=<?php echo $prev_step ?>">&lt; Back to step <strong><?php echo $prev_step ?></strong></a>
             <?php endif ?>
 
-            <?php if ($next_step <= sizeof($steps)): ?>
+            <?php if ($next_step <= $num_max_steps): ?>
             <input class="action btn"  type="submit" name="step2" value="Next - <?php echo $steps[$next_step]['title'] ?>" />
             <?php endif ?>
         </div>
@@ -2867,11 +3009,11 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
         
         <fieldset class="compare-tables">
             <legend>Source DB</legend>
-            <?php echo $src_form->render('div') ?>
+            <?php echo $src_form->render(); ?>
         </fieldset>
         <fieldset class="compare-tables">
             <legend>Destination DB</legend>
-        <?php echo $dst_form->render('div') ?>
+            <?php echo $dst_form->render() ?>
         </fieldset>
         
         <?php elseif ($step == 2): ?>
@@ -2885,11 +3027,11 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
             </tr>
             <?php $i = 0;
                   foreach($tables as $t): ?>
-            <tr class="<?php echo $i++ & 1 ? 'alt' : null ?> <?php if ($t['flag'] == '+') echo 'new'; if ($t['flag'] == '-') echo 'del'; ?>">
+            <tr class="<?php echo $i++ & 1 ? 'alt' : null ?> <?php echo $flag_css[$t['flag']] ?>">
                 <td class="center">
                     <input type="checkbox" name="new_tables[<?php echo $t['src'] ? $t['src'] : $t['dst'] ?>]" />
                 </td>
-                <td class="center"><?php echo $t['flag'] ? '<strong>' . $t['flag'] . '</strong>' : '&nbsp;' ?></td> 
+                <td class="center flag"><?php echo $t['flag'] ? '<strong>' . $t['flag'] . '</strong>' : '&nbsp;' ?></td> 
                 <td>
                     <?php echo $t['src'] ? $t['src'] : '&nbsp;' ?>
                 </td>
@@ -2921,8 +3063,8 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
                 <td class="text-top sub-header" colspan="5"><?php echo $t ?></td>
             </tr>
                 <?php foreach($cols as $j => $c): ?>
-                        <tr class="<?php if ($c['flag'] == '+') echo 'new'; if ($c['flag'] == '-') echo 'del'; ?>">
-                            <td class="center"><?php echo $c['flag'] ? $c['flag'] : '&nbsp;' ?></td>
+                        <tr class="<?php echo $flag_css[$c['flag']] ?>">
+                            <td class="center flag"><?php echo $c['flag'] ? $c['flag'] : '&nbsp;' ?></td>
                             <td><?php echo $c['src'] ? $c['src'] : '&nbsp;' ?></td>
                             <td><?php echo $c['dst'] ? $c['dst'] : '&nbsp;' ?></td>
                             <?php if ($j == 0): ?>
