@@ -1,5 +1,7 @@
 <?php
 
+session_start();
+
 $step  = max($_GET['step'], 1);
 $forms = array();
 
@@ -123,10 +125,12 @@ function migrate_generate_alter_sql($table, $src_info, $dst_info, $news, $dels) 
 
 class Simple_DB {
     protected $db;
-    public function __construct($dsn) {
-        list($d, $user, $pass) = explode('|', $dsn);
+    public function __construct($data) {
         
-        $this->db = new PDO($d, $user, $pass, array(
+        # try connect db
+        $dsn  = 'mysql:dbname=' . $data['name'] . ';host=localhost';
+        
+        $this->db = new PDO($dsn, $data['user'], $data['pass'], array(
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         ));
@@ -199,20 +203,19 @@ class Simple_Form {
                 # failed
                 if ($er = $v->validate($e['rules'], $val))
                     $errors[$name] = join(', ', $er);
-                
-                # passed
-                else
-                    $this->cleaned[$name] = $val;
             }
+                            
+            # store submit data
+            $this->cleaned[$name] = $val;
         }
-        
+
         if ($errors) {
             $this->errors = $errors;
         }
 
         return !$this->has_error();
     }
-
+    
     public function has_error() {
         return sizeof($this->errors);
     }
@@ -223,8 +226,8 @@ class Simple_Form {
         foreach($this->elements as $name => $e) {
             $render = 'render_' . $e['type'];
             $label  = $this->render_label($name);
-            $name   = $this->create_name($name);
-            $html[] = "<$as $attrs>" . $label . $this->$render($name, $this->val($name), $this->attr($name)) . "</$as>";
+            $_name  = $this->create_name($name);
+            $html[] = "<$as $attrs>" . $label . $this->$render($_name, $this->val($name), $this->attr($name)) . "</$as>";
         }
         
         return join("\n", $html);
@@ -239,6 +242,16 @@ class Simple_Form {
         return sprintf('<input type="text" name="%s" value="%s" %s/>', $name, $val, $attrs);
     }
     
+    public function render_errors() {
+        $s = array();
+
+        foreach($this->errors as $name => $v)
+            $s[] = "<li><strong>$name</strong> " . $v;
+
+        $title = '<h4 class="error-title">' . $this->configs['title'] . '</h4>';
+        
+        return '<ul class="alert-message error">' . join("\n", $s) . '</ul>';
+    }
     
     public function attr($name) {
         return !empty($this->elements[$name]['attrs']) ? $this->elements[$name]['attrs'] : '';
@@ -246,11 +259,11 @@ class Simple_Form {
     
     public function val($name, $data = array()) {
         
+        if ($data && $this->ns)
+            $data = $data[$this->ns];
+
         if (!$data)
             $data = $this->cleaned;
-        
-        if ($this->ns)
-            $data = $data[$this->ns];
 
         return array_key_exists($name, (array)$data) ? $data[$name] : null;
     }
@@ -323,13 +336,10 @@ class Form_Migrate_DB extends Simple_Form {
             return;
         
         $data = $this->cleaned;
-
-        # try connect db
-        $dsn  = 'mysql:dbname=' . $data['name'] . ';host=localhost|'  . $data['user'] . '|' . $data['pass'];
         
         try {
-            $db = new Simple_DB($dsn);
-            $_SESSION['migrate'][$this->ns . '_db'] = $dsn;
+            $db = new Simple_DB($data);
+            $_SESSION['migrate'][$this->ns . '_db'] = $data;
         }
         catch(Exception $e) {
             $this->errors['name'] = $e->getMessage();
@@ -347,21 +357,23 @@ switch($step) {
         
         $src_form = new Form_Migrate_DB(null, array('ns' => 'src', 'title' => 'Source DB'));
         $dst_form = new Form_Migrate_DB(null, array('ns' => 'dst', 'title' => 'Destination DB'));
+        $forms    = array($src_form, $dst_form);
 
+        # pre-filled
+        if (!empty($_SESSION['migrate']['src_db']) && !empty($_SESSION['migrate']['dst_db'])) {
+            
+            foreach(array($_SESSION['migrate']['src_db'], $_SESSION['migrate']['dst_db']) as $i => $d)
+                $forms[$i]->cleaned = $d;
+        }
+        
         if ($_POST) {
 
-            $errors = array();
-            foreach(array($src_form, $dst_form) as $f) {
-                if (!$f->is_valid($_POST))
-                    $errors[] = $f->errors;
-            }
+            $valid = 1;
+
+            foreach($forms as $f)
+                $valid &= $f->is_valid($_POST);
             
-            if ($errors) {
-                $errors    = current($errors);
-                $not_fatal = 1;
-            }
-            
-            if (!$errors)
+            if ($valid)
                 migrate_redirect('?step=' . $next_step);
 
         }
@@ -2953,6 +2965,8 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
     }
     .error ul {
         margin: 0;
+    }
+    .error ul, .error {
         list-style: none;
     }
 </style>
@@ -2988,7 +3002,7 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
         <?php endforeach ?>
     </ul>
     <?php else: ?>
-    <p><?php echo $errors ?></p>
+    <?php echo $errors ?>
     <?php endif ?>
 </div>
 <?php endif ?>
@@ -3007,14 +3021,13 @@ button.btn::-moz-focus-inner, input[type=submit].btn::-moz-focus-inner {
         
         <?php if ($step == 1): ?>
         
+        <?php foreach($forms as $f): ?>
         <fieldset class="compare-tables">
-            <legend>Source DB</legend>
-            <?php echo $src_form->render(); ?>
+            <legend><?php echo $f->configs['title'] ?></legend>
+            <?php if ($f->has_error()) echo $f->render_errors() ?>
+            <?php echo $f->render(); ?>
         </fieldset>
-        <fieldset class="compare-tables">
-            <legend>Destination DB</legend>
-            <?php echo $dst_form->render() ?>
-        </fieldset>
+        <?php endforeach ?>
         
         <?php elseif ($step == 2): ?>
         
